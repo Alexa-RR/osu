@@ -1,0 +1,101 @@
+name: Build osu! app
+
+on: [push]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read # to fetch code (actions/checkout)
+
+jobs:
+   build-ios:
+      name: Build (iOS)
+      runs-on: macos-latest
+      timeout-minutes: 60
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v2
+          
+        - name: Install .NET 6.0.x
+          uses: actions/setup-dotnet@v1
+          with:
+            dotnet-version: "6.0.x"
+        
+       # FIXME: Tools won't run in .NET 6.0 unless you install 3.1.x LTS side by side.
+        # https://itnext.io/how-to-support-multiple-net-sdks-in-github-actions-workflows-b988daa884e  
+        - name: Install .NET 3.1.x LTS
+          uses: actions/setup-dotnet@v1
+          with:
+            dotnet-version: "3.1.x"
+        # Contrary to seemingly any other msbuild, msbuild running on macOS/Mono
+        # cannot accept .sln(f) files as arguments.
+        # Build just the main game for now.
+        - name: Install the Apple certificate and provisioning profile and api key
+          env:
+            BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+            P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+            BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+            KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+            APPLE_KEYID: ${{ secrets.APPLE_PRIVATE_KEY }}
+          run: |
+            # create variables
+            CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+            PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+            KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+            AUTHKEY_PATH=$RUNNER_TEMP/${{ secrets.AUTHKEY_FILENAME }}
+            
+            # import certificate and provisioning profile from secrets
+            echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
+            echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode --output $PP_PATH
+            # create temporary keychain
+            security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+            security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+            # import certificate to keychain
+            security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+            security list-keychain -d user -s $KEYCHAIN_PATH
+            # apply provisioning profile
+            mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+            cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+            
+            # import api key
+            echo -n "$APPLE_KEYID" | base64 --decode --output $AUTHKEY_PATH
+            mkdir -p ~/work/osu/osu/private_keys
+            cp $AUTHKEY_PATH ~/work/osu/osu/private_keys
+            
+            
+        - name: Update Info.plist
+          uses: damienaicheh/update-ios-version-info-plist-action@v1.0.0
+          with:
+            info-plist-path: "osu.iOS/Info.plist"
+            bundle-short-version-string: "0.5${{ github.run_number }}"
+            bundle-version: "0.${{ github.run_number }}"
+            print-file: true
+        - name: Install .NET Workloads
+          run: dotnet workload install maui-ios
+     #  - name: Restore Tools
+         # run: dotnet tool restore
+        
+    #   - name: Restore Packages
+    #     run: dotnet restore
+
+        - name: Build
+          run:  dotnet build osu.iOS /restore /p:BuildIpa=true /p:IpaPackageDir="$RUNNER_TEMP" /p:Platform=iPhone /p:ArchiveOnBuild=true /p:Configuration=Release
+          
+        
+        - name: Upload app to TestFlight
+          # You may pin to the exact commit or the version.
+          # uses: Apple-Actions/upload-testflight-build@54dc215b4cd5529730db39f11c84efdb71414e07
+          uses: Apple-Actions/upload-testflight-build@v1
+          with:
+            # The path to the app (ipa etc)
+            app-path: /Users/runner/work/_temp/osu.iOS.ipa
+            # The type of app to upload (osx | ios | appletvos)
+            app-type: ios
+            # The AppStoreConnect API Key Issuer Identifier
+            issuer-id: ${{ secrets.APPLE_ISSUER_ID }}
+            # The Key ID for AppStore Connect API
+            api-key-id: ${{ secrets.APPLE_KEY_ID }}
+            # The PKCS8 format Private Key for AppStore Connect API
+            api-private-key: /Users/runner/work/osu/osu/private_keys/${{ secrets.AUTHKEY_FILENAME }}
