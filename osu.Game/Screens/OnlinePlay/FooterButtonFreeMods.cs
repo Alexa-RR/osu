@@ -18,15 +18,28 @@ using osu.Game.Graphics.UserInterface;
 using osu.Game.Rulesets.Mods;
 using osu.Game.Screens.Select;
 using osuTK;
+using osu.Game.Localisation;
 
 namespace osu.Game.Screens.OnlinePlay
 {
     public partial class FooterButtonFreeMods : FooterButton, IHasCurrentValue<IReadOnlyList<Mod>>
     {
-        public Bindable<IReadOnlyList<Mod>> Current { get; set; } = new BindableWithCurrent<IReadOnlyList<Mod>>();
+        private readonly BindableWithCurrent<IReadOnlyList<Mod>> current = new BindableWithCurrent<IReadOnlyList<Mod>>(Array.Empty<Mod>());
+
+        public Bindable<IReadOnlyList<Mod>> Current
+        {
+            get => current.Current;
+            set
+            {
+                ArgumentNullException.ThrowIfNull(value);
+
+                current.Current = value;
+            }
+        }
+
+        public new Action Action { set => throw new NotSupportedException("The click action is handled by the button itself."); }
 
         private OsuSpriteText count = null!;
-
         private Circle circle = null!;
 
         private readonly FreeModSelectOverlay freeModSelectOverlay;
@@ -34,6 +47,9 @@ namespace osu.Game.Screens.OnlinePlay
         public FooterButtonFreeMods(FreeModSelectOverlay freeModSelectOverlay)
         {
             this.freeModSelectOverlay = freeModSelectOverlay;
+
+            // Overwrite any external behaviour as we delegate the main toggle action to a sub-button.
+            base.Action = toggleAllFreeMods;
         }
 
         [Resolved]
@@ -80,6 +96,8 @@ namespace osu.Game.Screens.OnlinePlay
             SelectedColour = colours.Yellow;
             DeselectedColour = SelectedColour.Opacity(0.5f);
             Text = @"freemods";
+
+            TooltipText = MultiplayerMatchStrings.FreeModsButtonTooltip;
         }
 
         protected override void LoadComplete()
@@ -87,9 +105,6 @@ namespace osu.Game.Screens.OnlinePlay
             base.LoadComplete();
 
             Current.BindValueChanged(_ => updateModDisplay(), true);
-
-            // Overwrite any external behaviour as we delegate the main toggle action to a sub-button.
-            Action = toggleAllFreeMods;
         }
 
         /// <summary>
@@ -106,17 +121,17 @@ namespace osu.Game.Screens.OnlinePlay
 
         private void updateModDisplay()
         {
-            int current = Current.Value.Count;
+            int currentCount = Current.Value.Count;
 
-            if (current == allAvailableAndValidMods.Count())
+            if (currentCount == allAvailableAndValidMods.Count())
             {
                 count.Text = "all";
                 count.FadeColour(colours.Gray2, 200, Easing.OutQuint);
                 circle.FadeColour(colours.Yellow, 200, Easing.OutQuint);
             }
-            else if (current > 0)
+            else if (currentCount > 0)
             {
-                count.Text = $"{current} mods";
+                count.Text = $"{currentCount} mods";
                 count.FadeColour(colours.Gray2, 200, Easing.OutQuint);
                 circle.FadeColour(colours.YellowDark, 200, Easing.OutQuint);
             }
