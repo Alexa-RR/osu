@@ -12,13 +12,15 @@ using osu.Framework.Graphics;
 using osu.Framework.Graphics.Colour;
 using osu.Framework.Graphics.Containers;
 using osu.Framework.Graphics.Shapes;
+using osu.Framework.Input.Events;
 using osu.Framework.Threading;
 using osu.Framework.Timing;
 using osu.Framework.Utils;
 using osu.Game.Beatmaps.ControlPoints;
+using osu.Game.Graphics;
 using osu.Game.Graphics.Containers;
-using osu.Game.Graphics.Sprites;
 using osu.Game.Overlays;
+using osu.Game.Utils;
 using osuTK;
 
 namespace osu.Game.Screens.Edit.Timing
@@ -27,23 +29,28 @@ namespace osu.Game.Screens.Edit.Timing
     {
         private Container swing = null!;
 
-        private OsuSpriteText bpmText = null!;
+        private OsuTextFlowContainer bpmText = null!;
 
         private Drawable weight = null!;
         private Drawable stick = null!;
 
         private IAdjustableClock metronomeClock = null!;
 
-        private Sample? sampleTick;
-        private Sample? sampleTickDownbeat;
         private Sample? sampleLatch;
 
-        private ScheduledDelegate? tickPlaybackDelegate;
+        private readonly MetronomeTick metronomeTick = new MetronomeTick();
 
         [Resolved]
         private OverlayColourProvider overlayColourProvider { get; set; } = null!;
 
-        public bool EnableClicking { get; set; } = true;
+        [Resolved]
+        private BindableBeatDivisor beatDivisor { get; set; } = null!;
+
+        public bool EnableClicking
+        {
+            get => metronomeTick.EnableClicking;
+            set => metronomeTick.EnableClicking = value;
+        }
 
         public MetronomeDisplay()
         {
@@ -53,8 +60,6 @@ namespace osu.Game.Screens.Edit.Timing
         [BackgroundDependencyLoader]
         private void load(AudioManager audio)
         {
-            sampleTick = audio.Samples.Get(@"UI/metronome-tick");
-            sampleTickDownbeat = audio.Samples.Get(@"UI/metronome-tick-downbeat");
             sampleLatch = audio.Samples.Get(@"UI/metronome-latch");
 
             const float taper = 25;
@@ -67,8 +72,11 @@ namespace osu.Game.Screens.Edit.Timing
 
             AutoSizeAxes = Axes.Both;
 
+            metronomeTick.Ticked = onTickPlayed;
+
             InternalChildren = new Drawable[]
             {
+                metronomeTick,
                 new Container
                 {
                     Name = @"Taper adjust",
@@ -206,10 +214,15 @@ namespace osu.Game.Screens.Edit.Timing
                         },
                     }
                 },
-                bpmText = new OsuSpriteText
+                bpmText = new OsuTextFlowContainer(st =>
+                {
+                    st.Font = OsuFont.Default.With(fixedWidth: true);
+                    st.Spacing = new Vector2(-2.2f, 0);
+                })
                 {
                     Name = @"BPM display",
                     Colour = overlayColourProvider.Content1,
+                    AutoSizeAxes = Axes.Both,
                     Anchor = Anchor.BottomCentre,
                     Origin = Anchor.BottomCentre,
                     Y = -3,
@@ -219,21 +232,56 @@ namespace osu.Game.Screens.Edit.Timing
             Clock = new FramedClock(metronomeClock = new StopwatchClock(true));
         }
 
-        private double beatLength;
+        private double effectiveBeatLength;
+
+        private double effectiveBpm => 60_000 / effectiveBeatLength;
 
         private TimingControlPoint timingPoint = null!;
 
         private bool isSwinging;
 
-        private readonly BindableInt interpolatedBpm = new BindableInt();
+        private readonly BindableDouble interpolatedBpm = new BindableDouble();
 
         private ScheduledDelegate? latchDelegate;
+
+        private bool spedUp;
+
+        private int computeSpedUpDivisor()
+        {
+            if (!spedUp)
+                return 1;
+
+            if (beatDivisor.Value % 3 == 0)
+                return 3;
+            if (beatDivisor.Value % 2 == 0)
+                return 2;
+
+            return 1;
+        }
 
         protected override void LoadComplete()
         {
             base.LoadComplete();
 
-            interpolatedBpm.BindValueChanged(bpm => bpmText.Text = bpm.NewValue.ToLocalisableString());
+            interpolatedBpm.BindValueChanged(_ => updateBpmText());
+        }
+
+        private void updateBpmText()
+        {
+            int intPart = (int)interpolatedBpm.Value;
+
+            bpmText.Text = intPart.ToLocalisableString();
+
+            // While interpolating between two integer values, showing the decimal places would look a bit odd
+            // so rounding is applied until we're close to the final value.
+            int decimalPlaces = FormatUtils.FindPrecision((decimal)effectiveBpm);
+
+            if (decimalPlaces > 0)
+            {
+                bool reachedFinalNumber = intPart == (int)effectiveBpm;
+
+                bpmText.AddText((effectiveBpm % 1).ToLocalisableString("." + new string('0', decimalPlaces)), cp => cp.Alpha = reachedFinalNumber ? 0.5f : 0.1f);
+            }
         }
 
         protected override void Update()
@@ -247,16 +295,19 @@ namespace osu.Game.Screens.Edit.Timing
 
             timingPoint = BeatSyncSource.ControlPoints.TimingPointAt(BeatSyncSource.Clock.CurrentTime);
 
-            if (beatLength != timingPoint.BeatLength)
+            Divisor = metronomeTick.Divisor = computeSpedUpDivisor();
+
+            if (effectiveBeatLength != timingPoint.BeatLength / Divisor)
             {
-                beatLength = timingPoint.BeatLength;
+                effectiveBeatLength = timingPoint.BeatLength / Divisor;
 
                 EarlyActivationMilliseconds = timingPoint.BeatLength / 2;
 
-                float bpmRatio = (float)Interpolation.ApplyEasing(Easing.OutQuad, Math.Clamp((timingPoint.BPM - 30) / 480, 0, 1));
+                float bpmRatio = (float)Interpolation.ApplyEasing(Easing.OutQuad, Math.Clamp((effectiveBpm - 30) / 480, 0, 1));
 
                 weight.MoveToY((float)Interpolation.Lerp(0.1f, 0.83f, bpmRatio), 600, Easing.OutQuint);
-                this.TransformBindableTo(interpolatedBpm, (int)Math.Round(timingPoint.BPM), 600, Easing.OutQuint);
+
+                this.TransformBindableTo(interpolatedBpm, effectiveBpm, 300, Easing.OutExpo);
             }
 
             if (!BeatSyncSource.Clock.IsRunning && isSwinging)
@@ -264,9 +315,6 @@ namespace osu.Game.Screens.Edit.Timing
                 swing.ClearTransforms(true);
 
                 isSwinging = false;
-
-                tickPlaybackDelegate?.Cancel();
-                tickPlaybackDelegate = null;
 
                 // instantly latch if pendulum arm is close enough to center (to prevent awkward delayed playback of latch sound)
                 if (Precision.AlmostEquals(swing.Rotation, 0, 1))
@@ -305,28 +353,70 @@ namespace osu.Game.Screens.Edit.Timing
             float currentAngle = swing.Rotation;
             float targetAngle = currentAngle > 0 ? -angle : angle;
 
-            swing.RotateTo(targetAngle, beatLength, Easing.InOutQuad);
+            swing.RotateTo(targetAngle, effectiveBeatLength, Easing.InOutQuad);
+        }
 
-            if (currentAngle != 0 && Math.Abs(currentAngle - targetAngle) > angle * 1.8f && isSwinging)
+        private void onTickPlayed()
+        {
+            // Originally, this flash only occurred when the pendulum correctly passess the centre.
+            // Mappers weren't happy with the metronome tick not playing immediately after starting playback
+            // so now this matches the actual tick sample.
+            stick.FlashColour(overlayColourProvider.Content1, effectiveBeatLength, Easing.OutQuint);
+        }
+
+        protected override bool OnKeyDown(KeyDownEvent e)
+        {
+            updateDivisorFromKey(e);
+
+            return base.OnKeyDown(e);
+        }
+
+        protected override void OnKeyUp(KeyUpEvent e)
+        {
+            base.OnKeyUp(e);
+
+            updateDivisorFromKey(e);
+        }
+
+        private void updateDivisorFromKey(UIEvent e) => spedUp = e.ControlPressed;
+
+        private partial class MetronomeTick : BeatSyncedContainer
+        {
+            public bool EnableClicking;
+
+            private Sample? sampleTick;
+            private Sample? sampleTickDownbeat;
+
+            public Action? Ticked;
+
+            public MetronomeTick()
             {
-                using (BeginDelayedSequence(beatLength / 2))
-                {
-                    stick.FlashColour(overlayColourProvider.Content1, beatLength, Easing.OutQuint);
+                AllowMistimedEventFiring = false;
+            }
 
-                    tickPlaybackDelegate = Schedule(() =>
-                    {
-                        if (!EnableClicking)
-                            return;
+            [BackgroundDependencyLoader]
+            private void load(AudioManager audio)
+            {
+                sampleTick = audio.Samples.Get(@"UI/metronome-tick");
+                sampleTickDownbeat = audio.Samples.Get(@"UI/metronome-tick-downbeat");
+            }
 
-                        var channel = beatIndex % timingPoint.TimeSignature.Numerator == 0 ? sampleTickDownbeat?.GetChannel() : sampleTick?.GetChannel();
+            protected override void OnNewBeat(int beatIndex, TimingControlPoint timingPoint, EffectControlPoint effectPoint, ChannelAmplitudes amplitudes)
+            {
+                base.OnNewBeat(beatIndex, timingPoint, effectPoint, amplitudes);
 
-                        if (channel == null)
-                            return;
+                if (!IsBeatSyncedWithTrack || !EnableClicking)
+                    return;
 
-                        channel.Frequency.Value = RNG.NextDouble(0.98f, 1.02f);
-                        channel.Play();
-                    });
-                }
+                var channel = beatIndex % timingPoint.TimeSignature.Numerator == 0 ? sampleTickDownbeat?.GetChannel() : sampleTick?.GetChannel();
+
+                if (channel == null)
+                    return;
+
+                channel.Frequency.Value = RNG.NextDouble(0.98f, 1.02f);
+                channel.Play();
+
+                Ticked?.Invoke();
             }
         }
     }

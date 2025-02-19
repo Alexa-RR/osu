@@ -5,7 +5,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using osu.Framework.Extensions.LocalisationExtensions;
+using osu.Framework.Localisation;
 using osu.Game.Online.API;
+using osu.Game.Online.Rooms;
 using osu.Game.Rulesets;
 using osu.Game.Rulesets.Mods;
 
@@ -121,7 +124,7 @@ namespace osu.Game.Utils
             if (!CheckCompatibleSet(mods, out invalidMods))
                 return false;
 
-            return checkValid(mods, m => m.Type != ModType.System && m.HasImplementation, out invalidMods);
+            return checkValid(mods, m => m.HasImplementation, out invalidMods);
         }
 
         /// <summary>
@@ -225,6 +228,110 @@ namespace osu.Game.Utils
             }
 
             return proposedWereValid;
+        }
+
+        /// <summary>
+        /// Verifies all mods provided belong to the given ruleset.
+        /// </summary>
+        /// <param name="ruleset">The ruleset to check the proposed mods against.</param>
+        /// <param name="proposedMods">The mods proposed for checking.</param>
+        /// <returns>Whether all <paramref name="proposedMods"/> belong to the given <paramref name="ruleset"/>.</returns>
+        public static bool CheckModsBelongToRuleset(Ruleset ruleset, IEnumerable<Mod> proposedMods)
+        {
+            var rulesetModsTypes = ruleset.AllMods.Select(m => m.GetType()).ToList();
+
+            foreach (var proposedMod in proposedMods)
+            {
+                bool found = false;
+
+                var proposedModType = proposedMod.GetType();
+
+                foreach (var rulesetModType in rulesetModsTypes)
+                {
+                    if (rulesetModType.IsAssignableFrom(proposedModType))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Given a value of a score multiplier, returns a string version with special handling for a value near 1.00x.
+        /// </summary>
+        /// <param name="scoreMultiplier">The value of the score multiplier.</param>
+        /// <returns>A formatted score multiplier with a trailing "x" symbol</returns>
+        public static LocalisableString FormatScoreMultiplier(double scoreMultiplier)
+        {
+            // Round multiplier values away from 1.00x to two significant digits.
+            if (scoreMultiplier > 1)
+                scoreMultiplier = Math.Ceiling(Math.Round(scoreMultiplier * 100, 12)) / 100;
+            else
+                scoreMultiplier = Math.Floor(Math.Round(scoreMultiplier * 100, 12)) / 100;
+
+            return scoreMultiplier.ToLocalisableString("0.00x");
+        }
+
+        /// <summary>
+        /// Calculate the rate for the song with the selected mods.
+        /// </summary>
+        /// <param name="mods">The list of selected mods.</param>
+        /// <returns>The rate with mods.</returns>
+        public static double CalculateRateWithMods(IEnumerable<Mod> mods)
+        {
+            double rate = 1;
+
+            // TODO: This doesn't consider mods which apply variable rates, yet.
+            foreach (var mod in mods.OfType<IApplicableToRate>())
+                rate = mod.ApplyToRate(0, rate);
+
+            return rate;
+        }
+
+        /// <summary>
+        /// Determines whether a mod can be applied to playlist items in the given match type.
+        /// </summary>
+        /// <param name="mod">The mod to test.</param>
+        /// <param name="type">The match type.</param>
+        public static bool IsValidModForMatchType(Mod mod, MatchType type)
+        {
+            if (mod.Type == ModType.System || !mod.UserPlayable || !mod.HasImplementation)
+                return false;
+
+            switch (type)
+            {
+                case MatchType.Playlists:
+                    return true;
+
+                default:
+                    return mod.ValidForMultiplayer;
+            }
+        }
+
+        /// <summary>
+        /// Determines whether a mod can be applied as a free mod to playlist items in the given match type.
+        /// </summary>
+        /// <param name="mod">The mod to test.</param>
+        /// <param name="type">The match type.</param>
+        public static bool IsValidFreeModForMatchType(Mod mod, MatchType type)
+        {
+            if (mod.Type == ModType.System || !mod.UserPlayable || !mod.HasImplementation)
+                return false;
+
+            switch (type)
+            {
+                case MatchType.Playlists:
+                    return true;
+
+                default:
+                    return mod.ValidForMultiplayerAsFreeMod;
+            }
         }
     }
 }

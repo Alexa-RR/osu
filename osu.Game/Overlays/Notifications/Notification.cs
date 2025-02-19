@@ -34,9 +34,15 @@ namespace osu.Game.Overlays.Notifications
         public abstract LocalisableString Text { get; set; }
 
         /// <summary>
-        /// Whether this notification should forcefully display itself.
+        /// Important notifications display for longer, and announce themselves at an OS level (ie flashing the taskbar).
+        /// This defaults to <c>true</c>.
         /// </summary>
-        public virtual bool IsImportant => true;
+        public bool IsImportant { get; init; } = true;
+
+        /// <summary>
+        /// Transient notifications only show as a toast, and do not linger in notification history.
+        /// </summary>
+        public bool Transient { get; init; }
 
         /// <summary>
         /// Run on user activating the notification. Return true to close.
@@ -53,13 +59,15 @@ namespace osu.Game.Overlays.Notifications
         public virtual string PopInSampleName => "UI/notification-default";
         public virtual string PopOutSampleName => "UI/overlay-pop-out";
 
+        protected const float CORNER_RADIUS = 6;
+
         protected NotificationLight Light;
 
         protected Container IconContent;
 
         public bool WasClosed { get; private set; }
 
-        private readonly Container content;
+        private readonly FillFlowContainer content;
 
         protected override Container<Drawable> Content => content;
 
@@ -128,7 +136,7 @@ namespace osu.Game.Overlays.Notifications
                     AutoSizeAxes = Axes.Y,
                 }.WithChild(MainContent = new Container
                 {
-                    CornerRadius = 6,
+                    CornerRadius = CORNER_RADIUS,
                     Masking = true,
                     RelativeSizeAxes = Axes.X,
                     AutoSizeAxes = Axes.Y,
@@ -166,11 +174,13 @@ namespace osu.Game.Overlays.Notifications
                                         Padding = new MarginPadding(10),
                                         Children = new Drawable[]
                                         {
-                                            content = new Container
+                                            content = new FillFlowContainer
                                             {
                                                 Masking = true,
                                                 RelativeSizeAxes = Axes.X,
                                                 AutoSizeAxes = Axes.Y,
+                                                Direction = FillDirection.Vertical,
+                                                Spacing = new Vector2(15)
                                             },
                                         }
                                     },
@@ -471,10 +481,9 @@ namespace osu.Game.Overlays.Notifications
                     base.Colour = value;
                     pulsateLayer.EdgeEffect = new EdgeEffectParameters
                     {
-                        Colour = ((Color4)value).Opacity(0.5f), //todo: avoid cast
+                        Colour = ((Color4)value).Opacity(0.18f),
                         Type = EdgeEffectType.Glow,
-                        Radius = 12,
-                        Roundness = 12,
+                        Radius = 14,
                     };
                 }
             }
