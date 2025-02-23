@@ -32,19 +32,26 @@ namespace osu.Game.Screens.Play
         private const int button_height = 70;
         private const float background_alpha = 0.75f;
 
-        protected override bool BlockNonPositionalInput => true;
-
         protected override bool BlockScrollInput => false;
 
         public override bool ReceivePositionalInputAt(Vector2 screenSpacePos) => true;
 
-        public Action? OnRetry;
-        public Action? OnQuit;
+        public Action? OnResume { get; init; }
+        public Action? OnRetry { get; init; }
+        public Action? OnQuit { get; init; }
 
         /// <summary>
         /// Action that is invoked when <see cref="GlobalAction.Back"/> is triggered.
         /// </summary>
-        protected virtual Action BackAction => () => InternalButtons.LastOrDefault()?.TriggerClick();
+        protected virtual Action BackAction => () =>
+        {
+            // We prefer triggering the button click as it will animate...
+            // but sometimes buttons aren't present (see FailOverlay's constructor as an example).
+            if (Buttons.Any())
+                Buttons.Last().TriggerClick();
+            else
+                OnQuit?.Invoke();
+        };
 
         /// <summary>
         /// Action that is invoked when <see cref="GlobalAction.Select"/> is triggered.
@@ -121,6 +128,15 @@ namespace osu.Game.Screens.Play
                 },
             };
 
+            if (OnResume != null)
+                AddButton(GameplayMenuOverlayStrings.Continue, colours.Green, () => OnResume.Invoke());
+
+            if (OnRetry != null)
+                AddButton(GameplayMenuOverlayStrings.Retry, colours.YellowDark, () => OnRetry.Invoke());
+
+            if (OnQuit != null)
+                AddButton(GameplayMenuOverlayStrings.Quit, new Color4(170, 27, 39, 255), () => OnQuit.Invoke());
+
             State.ValueChanged += _ => InternalButtons.Deselect();
 
             updateInfoText();
@@ -149,11 +165,6 @@ namespace osu.Game.Screens.Play
         }
 
         protected override void PopOut() => this.FadeOut(TRANSITION_DURATION, Easing.In);
-
-        // Don't let mouse down events through the overlay or people can click circles while paused.
-        protected override bool OnMouseDown(MouseDownEvent e) => true;
-
-        protected override bool OnMouseMove(MouseMoveEvent e) => true;
 
         protected void AddButton(LocalisableString text, Color4 colour, Action? action)
         {

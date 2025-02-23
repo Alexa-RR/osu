@@ -7,17 +7,24 @@ using System.Linq;
 using System.Threading.Tasks;
 using osu.Framework.Allocation;
 using osu.Framework.Bindables;
+using osu.Framework.Extensions.ObjectExtensions;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
+using osu.Framework.Input.Bindings;
+using osu.Framework.Input.Events;
 using osu.Framework.Localisation;
 using osu.Framework.Utils;
 using osu.Game.Beatmaps;
+using osu.Game.Configuration;
 using osu.Game.Database;
 using osu.Game.Graphics;
 using osu.Game.Graphics.Containers;
 using osu.Game.Graphics.Sprites;
+using osu.Game.Input.Bindings;
 using osu.Game.Localisation;
+using osu.Game.Overlays;
 using osu.Game.Overlays.Settings;
+using osu.Game.Overlays.Settings.Sections.Audio;
 using osu.Game.Rulesets.Mods;
 using osu.Game.Rulesets.Scoring;
 using osu.Game.Scoring;
@@ -26,9 +33,11 @@ using osuTK;
 
 namespace osu.Game.Screens.Play.PlayerSettings
 {
-    public partial class BeatmapOffsetControl : CompositeDrawable
+    public partial class BeatmapOffsetControl : CompositeDrawable, IKeyBindingHandler<GlobalAction>
     {
         public Bindable<ScoreInfo?> ReferenceScore { get; } = new Bindable<ScoreInfo?>();
+
+        private Bindable<ScoreInfo?> lastAppliedScore { get; } = new Bindable<ScoreInfo?>();
 
         public BindableDouble Current { get; } = new BindableDouble
         {
@@ -47,6 +56,12 @@ namespace osu.Game.Screens.Play.PlayerSettings
 
         [Resolved]
         private OsuColour colours { get; set; } = null!;
+
+        [Resolved]
+        private Player? player { get; set; }
+
+        [Resolved]
+        private IGameplayClock? gameplayClock { get; set; }
 
         private double lastPlayAverage;
         private double lastPlayBeatmapOffset;
@@ -74,7 +89,7 @@ namespace osu.Game.Screens.Play.PlayerSettings
                     new OffsetSliderBar
                     {
                         KeyboardStep = 5,
-                        LabelText = BeatmapOffsetControlStrings.BeatmapOffset,
+                        LabelText = BeatmapOffsetControlStrings.AudioOffsetThisBeatmap,
                         Current = Current,
                     },
                     referenceScoreContainer = new FillFlowContainer
@@ -88,33 +103,15 @@ namespace osu.Game.Screens.Play.PlayerSettings
             };
         }
 
-        public partial class OffsetSliderBar : PlayerSliderBar<double>
+        [BackgroundDependencyLoader]
+        private void load(SessionStatics statics)
         {
-            protected override Drawable CreateControl() => new CustomSliderBar();
-
-            protected partial class CustomSliderBar : SliderBar
-            {
-                public override LocalisableString TooltipText =>
-                    Current.Value == 0
-                        ? LocalisableString.Interpolate($@"{base.TooltipText} ms")
-                        : LocalisableString.Interpolate($@"{base.TooltipText} ms {getEarlyLateText(Current.Value)}");
-
-                private LocalisableString getEarlyLateText(double value)
-                {
-                    Debug.Assert(value != 0);
-
-                    return value > 0
-                        ? BeatmapOffsetControlStrings.HitObjectsAppearEarlier
-                        : BeatmapOffsetControlStrings.HitObjectsAppearLater;
-                }
-            }
+            statics.BindWith(Static.LastAppliedOffsetScore, lastAppliedScore);
         }
 
         protected override void LoadComplete()
         {
             base.LoadComplete();
-
-            ReferenceScore.BindValueChanged(scoreChanged, true);
 
             beatmapOffsetSubscription = realm.SubscribeToPropertyChanged(
                 r => r.Find<BeatmapInfo>(beatmap.Value.BeatmapInfo.ID)?.UserSettings,
@@ -124,7 +121,11 @@ namespace osu.Game.Screens.Play.PlayerSettings
                     // At the point we reach here, it's not guaranteed that all realm writes have taken place (there may be some in-flight).
                     // We are only aware of writes that originated from our own flow, so if we do see one that's active we can avoid handling the feedback value arriving.
                     if (realmWriteTask == null)
+                    {
+                        Current.Disabled = false;
                         Current.Value = val;
+                        Current.Disabled = allowOffsetAdjust;
+                    }
 
                     if (realmWriteTask?.IsCompleted == true)
                     {
@@ -134,7 +135,11 @@ namespace osu.Game.Screens.Play.PlayerSettings
                 });
 
             Current.BindValueChanged(currentChanged);
+            ReferenceScore.BindValueChanged(scoreChanged, true);
         }
+
+        // the last play graph is relative to the offset at the point of the last play, so we need to factor that out for some usages.
+        private double adjustmentSinceLastPlay => lastPlayBeatmapOffset - Current.Value;
 
         private void currentChanged(ValueChangedEvent<double> offset)
         {
@@ -142,9 +147,6 @@ namespace osu.Game.Screens.Play.PlayerSettings
 
             void updateOffset()
             {
-                // the last play graph is relative to the offset at the point of the last play, so we need to factor that out.
-                double adjustmentSinceLastPlay = lastPlayBeatmapOffset - Current.Value;
-
                 // Negative is applied here because the play graph is considering a hit offset, not track (as we currently use for clocks).
                 lastPlayGraph?.UpdateOffset(-adjustmentSinceLastPlay);
 
@@ -155,11 +157,6 @@ namespace osu.Game.Screens.Play.PlayerSettings
                     return;
                 }
 
-                if (useAverageButton != null)
-                {
-                    useAverageButton.Enabled.Value = !Precision.AlmostEquals(lastPlayAverage, adjustmentSinceLastPlay, Current.Precision / 2);
-                }
-
                 realmWriteTask = realm.WriteAsync(r =>
                 {
                     var setInfo = r.Find<BeatmapSetInfo>(beatmap.Value.BeatmapSetInfo.ID);
@@ -167,14 +164,15 @@ namespace osu.Game.Screens.Play.PlayerSettings
                     if (setInfo == null) // only the case for tests.
                         return;
 
-                    // Apply to all difficulties in a beatmap set for now (they generally always share timing).
+                    // Apply to all difficulties in a beatmap set if they have the same audio
+                    // (they generally always share timing).
                     foreach (var b in setInfo.Beatmaps)
                     {
-                        BeatmapUserSettings settings = b.UserSettings;
+                        BeatmapUserSettings userSettings = b.UserSettings;
                         double val = Current.Value;
 
-                        if (settings.Offset != val)
-                            settings.Offset = val;
+                        if (userSettings.Offset != val && b.AudioEquals(beatmap.Value.BeatmapInfo))
+                            userSettings.Offset = val;
                     }
                 });
             }
@@ -185,6 +183,12 @@ namespace osu.Game.Screens.Play.PlayerSettings
             referenceScoreContainer.Clear();
 
             if (score.NewValue == null)
+                return;
+
+            if (score.NewValue.Equals(lastAppliedScore.Value))
+                return;
+
+            if (!score.NewValue.BeatmapInfo.AsNonNull().Equals(beatmap.Value.BeatmapInfo))
                 return;
 
             if (score.NewValue.Mods.Any(m => !m.UserPlayable || m is IHasNoTimedInputs))
@@ -203,7 +207,10 @@ namespace osu.Game.Screens.Play.PlayerSettings
                 },
             };
 
-            if (hitEvents.Count < 10)
+            // affecting unstable rate here is used as a substitute of determining if a hit event represents a *timed* hit event,
+            // i.e. an user input that the user had to *time to the track*,
+            // i.e. one that it *makes sense to use* when doing anything with timing and offsets.
+            if (hitEvents.Count(HitEventExtensions.AffectsUnstableRate) < 10)
             {
                 referenceScoreContainer.AddRange(new Drawable[]
                 {
@@ -222,6 +229,8 @@ namespace osu.Game.Screens.Play.PlayerSettings
             lastPlayAverage = average;
             lastPlayBeatmapOffset = Current.Value;
 
+            LinkFlowContainer globalOffsetText;
+
             referenceScoreContainer.AddRange(new Drawable[]
             {
                 lastPlayGraph = new HitEventTimingDistributionGraph(hitEvents)
@@ -233,15 +242,124 @@ namespace osu.Game.Screens.Play.PlayerSettings
                 useAverageButton = new SettingsButton
                 {
                     Text = BeatmapOffsetControlStrings.CalibrateUsingLastPlay,
-                    Action = () => Current.Value = lastPlayBeatmapOffset - lastPlayAverage
+                    Action = () =>
+                    {
+                        if (Current.Disabled)
+                            return;
+
+                        Current.Value = lastPlayBeatmapOffset - lastPlayAverage;
+                        lastAppliedScore.Value = ReferenceScore.Value;
+                    },
                 },
+                globalOffsetText = new LinkFlowContainer
+                {
+                    RelativeSizeAxes = Axes.X,
+                    AutoSizeAxes = Axes.Y,
+                }
             });
+
+            if (settings != null)
+            {
+                globalOffsetText.AddText("You can also ");
+                globalOffsetText.AddLink("adjust the global offset", () => settings.ShowAtControl<AudioOffsetAdjustControl>());
+                globalOffsetText.AddText(" based off this play.");
+            }
         }
+
+        [Resolved]
+        private SettingsOverlay? settings { get; set; }
 
         protected override void Dispose(bool isDisposing)
         {
             base.Dispose(isDisposing);
             beatmapOffsetSubscription?.Dispose();
+        }
+
+        protected override void Update()
+        {
+            base.Update();
+
+            bool allow = allowOffsetAdjust;
+
+            if (useAverageButton != null)
+                useAverageButton.Enabled.Value = allow && !Precision.AlmostEquals(lastPlayAverage, adjustmentSinceLastPlay, Current.Precision / 2);
+
+            Current.Disabled = !allow;
+        }
+
+        private bool allowOffsetAdjust
+        {
+            get
+            {
+                // General limitations to ensure players don't do anything too weird.
+                // These match stable for now.
+                if (player is SubmittingPlayer)
+                {
+                    Debug.Assert(gameplayClock != null);
+
+                    // TODO: the blocking conditions should probably display a message.
+                    if (!player.IsBreakTime.Value && gameplayClock.CurrentTime - gameplayClock.GameplayStartTime > 10000)
+                        return false;
+
+                    if (gameplayClock.IsPaused.Value)
+                        return false;
+                }
+
+                return true;
+            }
+        }
+
+        public bool OnPressed(KeyBindingPressEvent<GlobalAction> e)
+        {
+            // To match stable, this should adjust by 5 ms, or 1 ms when holding alt.
+            // But that is hard to make work with global actions due to the operating mode.
+            // Let's use the more precise as a default for now.
+            const double amount = 1;
+
+            switch (e.Action)
+            {
+                case GlobalAction.IncreaseOffset:
+                    if (!Current.Disabled)
+                        Current.Value += amount;
+                    return true;
+
+                case GlobalAction.DecreaseOffset:
+                    if (!Current.Disabled)
+                        Current.Value -= amount;
+                    return true;
+            }
+
+            return false;
+        }
+
+        public void OnReleased(KeyBindingReleaseEvent<GlobalAction> e)
+        {
+        }
+
+        public static LocalisableString GetOffsetExplanatoryText(double offset)
+        {
+            return offset == 0
+                ? LocalisableString.Interpolate($@"{offset:0.0} ms")
+                : LocalisableString.Interpolate($@"{offset:0.0} ms {getEarlyLateText(offset)}");
+
+            LocalisableString getEarlyLateText(double value)
+            {
+                Debug.Assert(value != 0);
+
+                return value > 0
+                    ? BeatmapOffsetControlStrings.HitObjectsAppearEarlier
+                    : BeatmapOffsetControlStrings.HitObjectsAppearLater;
+            }
+        }
+
+        private partial class OffsetSliderBar : PlayerSliderBar<double>
+        {
+            protected override Drawable CreateControl() => new CustomSliderBar();
+
+            protected partial class CustomSliderBar : SliderBar
+            {
+                public override LocalisableString TooltipText => GetOffsetExplanatoryText(Current.Value);
+            }
         }
     }
 }

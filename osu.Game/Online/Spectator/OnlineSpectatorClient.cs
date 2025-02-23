@@ -24,7 +24,7 @@ namespace osu.Game.Online.Spectator
 
         public OnlineSpectatorClient(EndpointConfiguration endpoints)
         {
-            endpoint = endpoints.SpectatorEndpointUrl;
+            endpoint = endpoints.SpectatorUrl;
         }
 
         [BackgroundDependencyLoader]
@@ -42,6 +42,9 @@ namespace osu.Game.Online.Spectator
                     connection.On<int, FrameDataBundle>(nameof(ISpectatorClient.UserSentFrames), ((ISpectatorClient)this).UserSentFrames);
                     connection.On<int, SpectatorState>(nameof(ISpectatorClient.UserFinishedPlaying), ((ISpectatorClient)this).UserFinishedPlaying);
                     connection.On<int, long>(nameof(ISpectatorClient.UserScoreProcessed), ((ISpectatorClient)this).UserScoreProcessed);
+                    connection.On<SpectatorUser[]>(nameof(ISpectatorClient.UserStartedWatching), ((ISpectatorClient)this).UserStartedWatching);
+                    connection.On<int>(nameof(ISpectatorClient.UserEndedWatching), ((ISpectatorClient)this).UserEndedWatching);
+                    connection.On(nameof(IStatefulUserHubClient.DisconnectRequested), ((IStatefulUserHubClient)this).DisconnectRequested);
                 };
 
                 IsConnected.BindTo(connector.IsConnected);
@@ -112,6 +115,16 @@ namespace osu.Game.Online.Spectator
             Debug.Assert(connection != null);
 
             return connection.InvokeAsync(nameof(ISpectatorServer.EndWatchingUser), userId);
+        }
+
+        protected override async Task DisconnectInternal()
+        {
+            await base.DisconnectInternal().ConfigureAwait(false);
+
+            if (connector == null)
+                return;
+
+            await connector.Disconnect().ConfigureAwait(false);
         }
     }
 }
